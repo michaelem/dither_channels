@@ -165,7 +165,7 @@ pub fn dither(values: &[u8], width: usize, height: usize, channel: usize, option
         Algorithm::Threshold => values.iter().map(|&v| bit(v >= 128)).collect(),
         Algorithm::Random => pixels
             .zip(values)
-            .map(|((x, y), &v)| bit(v as u64 > noise(x, y, channel) % 256))
+            .map(|((x, y), &v)| bit(v as u64 > noise(x, y, channel) % 255))
             .collect(),
         Algorithm::Bayer(n) => {
             let matrix = bayer_matrix(n);
@@ -182,8 +182,11 @@ pub fn dither(values: &[u8], width: usize, height: usize, channel: usize, option
             pixels
                 .zip(values)
                 .map(|((x, y), &v)| {
-                    // Position inside the rotated cell, from -1 to 1 on both axes.
-                    let (x, y) = (x as f64 + 0.5, y as f64 + 0.5);
+                    // Position inside the rotated cell, from -1 to 1 on both axes. The screen is
+                    // shifted off the pixel centres, by different amounts across and down: on the
+                    // unrotated screen, pixels would otherwise sample mirrored spots of each cell,
+                    // which tie and flip together, jumping from 1/3 to 2/3 coverage around mid grey.
+                    let (x, y) = (x as f64 + 0.75, y as f64 + 0.875);
                     let u = (x * cos + y * sin) / HALFTONE_CELL;
                     let w = (-x * sin + y * cos) / HALFTONE_CELL;
                     let (u, w) = ((u - u.floor()) * 2.0 - 1.0, (w - w.floor()) * 2.0 - 1.0);
@@ -628,8 +631,7 @@ mod tests {
     #[test]
     fn white_stays_white() {
         let white = vec![255; 32 * 32];
-        // Random compares against noise up to 255, so pure white still gets a stray dot now and then.
-        for algorithm in ALGORITHMS.into_iter().filter(|&a| a != Algorithm::Random) {
+        for algorithm in ALGORITHMS {
             for c in 0..3 {
                 assert_eq!(coverage(&dither(&white, 32, 32, c, with(algorithm))), 1.0, "{}", algorithm.name());
             }
@@ -671,10 +673,19 @@ mod tests {
             assert!(levels.windows(2).all(|pair| pair[0] <= pair[1]), "channel {c}: {levels:?}");
             assert_eq!((levels[0], levels[8]), (0.0, 1.0), "channel {c}");
         }
-        // Dots touch in a checkerboard at mid grey. Only the rotated screens: on the
-        // 0° one (blue) pixel centres land exactly where the spot function ties.
-        for c in 0..2 {
+        // Dots touch in a checkerboard at mid grey, on the unrotated screen (blue) too.
+        for c in 0..3 {
             assert!((on(128, c) - 0.5).abs() < 0.03, "channel {c}: {:.3}", on(128, c));
+        }
+    }
+
+    #[test]
+    fn random_never_dots_pure_colors() {
+        // Every noise value must be beatable by 255 and none by 0.
+        let (w, h) = (256, 256);
+        for c in 0..3 {
+            assert!(dither(&vec![255; w * h], w, h, c, with(Algorithm::Random)).iter().all(|&v| v == 255));
+            assert!(dither(&vec![0; w * h], w, h, c, with(Algorithm::Random)).iter().all(|&v| v == 0));
         }
     }
 
