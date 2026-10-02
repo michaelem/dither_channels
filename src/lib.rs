@@ -111,7 +111,9 @@ impl Preset {
     }
 }
 
-pub const PRESET_NAMES: [&str; 5] = ["rgb", "riso", "gameboy", "sepia", "pico-4"];
+pub const PRESET_NAMES: [&str; 11] = [
+    "rgb", "riso", "riso-sunrise", "riso-mint", "gameboy", "sepia", "pico-4", "zx", "cga", "anaglyph", "thermal",
+];
 
 pub fn preset(name: &str) -> Option<Preset> {
     Some(match name {
@@ -126,8 +128,20 @@ pub fn preset(name: &str) -> Option<Preset> {
             colors: [[0x00, 0x78, 0xbf], [0xff, 0x48, 0xb0], [0xff, 0xe8, 0x00]],
             background: [0xf4, 0xef, 0xe4],
         }),
-        "gameboy" => Preset::Palette(ramp_palette([0x0f, 0x38, 0x0f], [0x9b, 0xbc, 0x0f])),
-        "sepia" => Preset::Palette(ramp_palette([0x2b, 0x1d, 0x0e], [0xf2, 0xe2, 0xc4])),
+        // Riso federal blue, bright red and sunflower inks on cream paper.
+        "riso-sunrise" => Preset::Channels(Channels {
+            mix: Mix::Ink,
+            colors: [[0x3d, 0x55, 0x88], [0xf1, 0x50, 0x60], [0xff, 0xb5, 0x11]],
+            background: [0xf6, 0xef, 0xdc],
+        }),
+        // Riso mint, purple and orange inks; their overlaps make browns and plums.
+        "riso-mint" => Preset::Channels(Channels {
+            mix: Mix::Ink,
+            colors: [[0x82, 0xd8, 0xd5], [0x76, 0x5b, 0xa7], [0xff, 0x6c, 0x2f]],
+            background: [0xf4, 0xef, 0xe4],
+        }),
+        "gameboy" => Preset::Palette(ramp_palette(&[[0x0f, 0x38, 0x0f], [0x9b, 0xbc, 0x0f]])),
+        "sepia" => Preset::Palette(ramp_palette(&[[0x2b, 0x1d, 0x0e], [0xf2, 0xe2, 0xc4]])),
         // The PICO-8 colors closest to each slot's black, blue, green, ... white.
         "pico-4" => Preset::Palette([
             [0x00, 0x00, 0x00],
@@ -139,16 +153,55 @@ pub fn preset(name: &str) -> Option<Preset> {
             [0xff, 0xec, 0x27],
             [0xff, 0xf1, 0xe8],
         ]),
+        // The ZX Spectrum's (non-bright) colors were built from these same bits.
+        "zx" => Preset::Channels(Channels {
+            mix: Mix::Light,
+            colors: [[0xd7, 0, 0], [0, 0xd7, 0], [0, 0, 0xd7]],
+            background: [0, 0, 0],
+        }),
+        // IBM CGA's low-intensity colors, also indexed by r, g, b bits,
+        // except that the monitor turned dark yellow into brown.
+        "cga" => Preset::Palette([
+            [0x00, 0x00, 0x00],
+            [0x00, 0x00, 0xaa],
+            [0x00, 0xaa, 0x00],
+            [0x00, 0xaa, 0xaa],
+            [0xaa, 0x00, 0x00],
+            [0xaa, 0x00, 0xaa],
+            [0xaa, 0x55, 0x00],
+            [0xaa, 0xaa, 0xaa],
+        ]),
+        // Red/cyan 3D-glasses look: red stays red, green and blue both add cyan
+        // (weighted by how bright they look, together making full cyan).
+        "anaglyph" => Preset::Channels(Channels {
+            mix: Mix::Light,
+            colors: [[0xff, 0, 0], [0, 0xb4, 0xb4], [0, 0x4b, 0x4b]],
+            background: [0, 0, 0],
+        }),
+        // Infrared-camera gradient from black through purple and red to pale yellow.
+        "thermal" => Preset::Palette(ramp_palette(&[
+            [0x00, 0x00, 0x00],
+            [0x2d, 0x0b, 0x59],
+            [0x8c, 0x1d, 0x82],
+            [0xe3, 0x46, 0x2a],
+            [0xfc, 0xa6, 0x36],
+            [0xff, 0xf6, 0xb0],
+        ])),
         _ => return None,
     })
 }
 
-// Maps each palette slot's brightness onto a gradient between two colors.
-pub fn ramp_palette(dark: [u8; 3], light: [u8; 3]) -> Palette {
+// Maps each palette slot's brightness onto a gradient through evenly spaced
+// color stops, darkest first. Needs at least two stops.
+pub fn ramp_palette(stops: &[[u8; 3]]) -> Palette {
     std::array::from_fn(|i| {
         let [r, g, b] = index_bits(i).map(|on| on as u8 as f32);
         let luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-        std::array::from_fn(|c| (dark[c] as f32 + (light[c] as f32 - dark[c] as f32) * luma).round() as u8)
+        let position = luma * (stops.len() - 1) as f32;
+        let segment = (position.floor() as usize).min(stops.len() - 2);
+        let t = position - segment as f32;
+        let (dark, light) = (stops[segment], stops[segment + 1]);
+        std::array::from_fn(|c| (dark[c] as f32 + (light[c] as f32 - dark[c] as f32) * t).round() as u8)
     })
 }
 

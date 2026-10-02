@@ -5,8 +5,9 @@
 // and <name>_dither.png (the recombined 8-color image) next to the input.
 //
 // The recombined image has one of 8 colors per pixel, picked by its r, g, b bits.
-// --palette swaps those colors for a preset (rgb, riso, gameboy, sepia, pico-4) or for
-// 8 hex colors in the order: black, blue, green, cyan, red, magenta, yellow, white.
+// --palette swaps those colors for a preset (rgb, riso, riso-sunrise, riso-mint,
+// gameboy, sepia, pico-4, zx, cga, anaglyph, thermal) or for 8 hex colors in the
+// order: black, blue, green, cyan, red, magenta, yellow, white.
 // Repeat --palette to write several versions; non-rgb ones get the palette name
 // in the file name (<name>_dither_riso.png, or _custom for hex lists).
 // --width scales the image before dithering (keeping its aspect ratio), which
