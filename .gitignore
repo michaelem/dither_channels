@@ -1,0 +1,14 @@
+# Build output, including the macOS app and .dmg from macos/build-app.sh
+/target/
+
+# Leftovers from rustfmt and merges
+**/*.rs.bk
+*.orig
+
+# macOS
+.DS_Store
+
+# Editors
+.idea/
+.vscode/
+*.swp
