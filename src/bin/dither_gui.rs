@@ -15,8 +15,11 @@ use std::sync::Arc;
 
 fn main() -> eframe::Result {
     let input = std::env::args().nth(1).map(PathBuf::from);
+    // eframe sets the Dock/taskbar icon at runtime (egui's logo unless told otherwise),
+    // which would also override the icon of the macOS app bundle.
+    let icon = eframe::icon_data::from_png_bytes(include_bytes!("../../macos/icon.png")).expect("icon is a valid PNG");
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([1200.0, 800.0]),
+        viewport: egui::ViewportBuilder::default().with_inner_size([1200.0, 800.0]).with_icon(icon),
         ..Default::default()
     };
     eframe::run_native(
