@@ -49,6 +49,16 @@ Game Boy, etc. It started as Ruby scripts (`../dither_channels.rb`,
 - Very large images are previewed at every n-th pixel (GPU texture limits);
   nearest filtering when zoomed in, mipmaps when zoomed out.
 - Export names look like `photo_dither_halftone_riso_400px.png`.
+- On macOS (`NATIVE_SIDEBAR`) the sidebar imitates a native one: the content runs
+  under a transparent title bar, the window is transparent, and
+  `add_sidebar_material` puts an `NSVisualEffectView` (sidebar material) *next to*
+  winit's view, below it in the frame view. As a subview of winit's view it would
+  cover egui's Metal layer. The sidebar panel has no fill; the preview paints an
+  opaque one. Sidebar controls get white fills (`mac_controls`), since egui's grey
+  ones vanish into the material. `use_system_font` swaps egui's thin Ubuntu Light
+  for San Francisco, read from `/System/Library/Fonts/SFNS.ttf` (not bundled).
+  Window screenshots don't show the translucency;
+  look at it over something colourful.
 
 ## Commands
 

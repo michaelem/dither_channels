@@ -21,10 +21,18 @@ fn main() -> eframe::Result {
     // eframe sets the Dock/taskbar icon at runtime (egui's logo unless told otherwise),
     // which would also override the icon of the macOS app bundle.
     let icon = eframe::icon_data::from_png_bytes(include_bytes!("../../../macos/icon.png")).expect("icon is a valid PNG");
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([1200.0, 800.0]).with_icon(icon),
-        ..Default::default()
-    };
+    let mut viewport = egui::ViewportBuilder::default().with_inner_size([1200.0, 800.0]).with_icon(icon);
+    // A Mac-style sidebar: the content goes up under a transparent title bar, so the
+    // sidebar runs the full height with the window buttons on top of it, and the
+    // window is see-through so the sidebar material can show behind it.
+    if NATIVE_SIDEBAR {
+        viewport = viewport
+            .with_fullsize_content_view(true)
+            .with_titlebar_shown(false)
+            .with_title_shown(false)
+            .with_transparent(true);
+    }
+    let options = eframe::NativeOptions { viewport, ..Default::default() };
     eframe::run_native(
         "Dither Channels",
         options,
@@ -35,6 +43,8 @@ fn main() -> eframe::Result {
             }
             #[cfg(target_os = "macos")]
             {
+                add_sidebar_material(cc);
+                use_system_font(&cc.egui_ctx);
                 let native_menu = menu::NativeMenu::new(&cc.egui_ctx, |command| app.menu_state(command));
                 app.native_menu = Some(native_menu);
             }
@@ -122,6 +132,11 @@ struct App {
 }
 
 const CHANNEL_LABELS: [&str; 3] = ["Red", "Green", "Blue"];
+
+// On macOS the sidebar is translucent and starts under the title bar.
+const NATIVE_SIDEBAR: bool = cfg!(target_os = "macos");
+// Height of the macOS title bar, which the content now extends under.
+const TITLE_BAR_HEIGHT: f32 = 28.0;
 
 impl App {
     fn new() -> Self {
@@ -392,14 +407,16 @@ impl App {
     }
 
     fn sidebar(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(8.0);
+        if NATIVE_SIDEBAR {
+            mac_controls(ui.visuals_mut());
+        }
+        ui.add_space(if NATIVE_SIDEBAR { 4.0 } else { 8.0 });
         if ui.button("Open image…").clicked() {
             self.open_dialog(ui.ctx());
         }
         ui.label(egui::RichText::new(&self.status).small().weak());
 
-        ui.separator();
-        ui.heading("Size");
+        section(ui, "Size");
         if let Some(loaded) = &self.loaded {
             let full = loaded.source.width();
             let height = height_for_width(&loaded.source, self.width);
@@ -420,8 +437,7 @@ impl App {
             ui.label(egui::RichText::new("Open an image first").weak());
         }
 
-        ui.separator();
-        ui.heading("Dither");
+        section(ui, "Dither");
         egui::ComboBox::from_label("Algorithm").selected_text(self.options.algorithm.label()).show_ui(ui, |ui| {
             for (i, algorithm) in ALGORITHMS.into_iter().enumerate() {
                 // Separate the error diffusion, ordered and other groups.
@@ -439,8 +455,7 @@ impl App {
         )
         .on_hover_text("Scan every other row right to left, which breaks up diagonal \"worm\" patterns");
 
-        ui.separator();
-        ui.heading("Colors");
+        section(ui, "Colors");
         ui.horizontal(|ui| {
             ui.label("Mix");
             for (mode, label, hover) in COLOR_MODES {
@@ -499,8 +514,7 @@ impl App {
             }
         });
 
-        ui.separator();
-        ui.heading("Preview");
+        section(ui, "Preview");
         ui.horizontal(|ui| {
             let before = self.view;
             ui.selectable_value(&mut self.view, View::Combined, "All");
@@ -520,10 +534,29 @@ impl App {
             self.set_zoom(1.0);
         }
 
-        ui.separator();
+        if NATIVE_SIDEBAR {
+            ui.add_space(14.0);
+        } else {
+            ui.separator();
+        }
         if ui.add_enabled(self.loaded.is_some(), egui::Button::new("Export PNG…")).clicked() {
             self.export();
         }
+    }
+
+    // The title is hidden from the real title bar (it would sit over the sidebar),
+    // so show the file name in the title bar strip above the preview, like Mac apps do.
+    fn title_bar(&self, ui: &mut egui::Ui) {
+        let title = self.loaded.as_ref().map_or("Dither Channels".to_string(), |l| file_name(&l.path));
+        let rect = ui.max_rect();
+        let strip = egui::Rect::from_min_max(rect.min - egui::vec2(0.0, TITLE_BAR_HEIGHT), egui::pos2(rect.max.x, rect.min.y));
+        ui.painter().text(
+            strip.left_center() + egui::vec2(4.0, 0.0),
+            egui::Align2::LEFT_CENTER,
+            title,
+            egui::FontId::proportional(13.0),
+            ui.visuals().strong_text_color(),
+        );
     }
 
     fn preview(&mut self, ui: &mut egui::Ui) {
@@ -550,6 +583,12 @@ impl App {
 }
 
 impl eframe::App for App {
+    // Transparent, so the sidebar material isn't covered.
+    #[cfg(target_os = "macos")]
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        [0.0; 4]
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.poll_job();
         let outdated =
@@ -565,11 +604,99 @@ impl eframe::App for App {
             self.run(command, ui.ctx());
         }
 
-        egui::Panel::left("controls").resizable(false).default_size(260.0).show(ui, |ui| {
+        let mut sidebar = egui::Panel::left("controls").resizable(false).default_size(260.0);
+        let mut central = egui::CentralPanel::default_margins();
+        if NATIVE_SIDEBAR {
+            // Clear, so the sidebar material shows through; the window buttons need room above.
+            let margin = egui::Margin { left: 12, right: 12, top: TITLE_BAR_HEIGHT as i8 + 8, bottom: 8 };
+            sidebar = sidebar.show_separator_line(true).frame(egui::Frame::new().inner_margin(margin));
+            let fill = ui.visuals().panel_fill;
+            let margin = egui::Margin { top: TITLE_BAR_HEIGHT as i8, ..egui::Margin::same(8) };
+            central = central.frame(egui::Frame::new().fill(fill).inner_margin(margin));
+        }
+        sidebar.show(ui, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| self.sidebar(ui));
         });
         self.update_texture(ui.ctx());
-        egui::CentralPanel::default_margins().show(ui, |ui| self.preview(ui));
+        central.show(ui, |ui| {
+            if NATIVE_SIDEBAR {
+                self.title_bar(ui);
+            }
+            self.preview(ui)
+        });
+    }
+}
+
+// Puts the translucent macOS sidebar material behind the whole window. The preview
+// paints over it; only the sidebar is left transparent.
+#[cfg(target_os = "macos")]
+fn add_sidebar_material(cc: &eframe::CreationContext) {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::{
+        NSAutoresizingMaskOptions, NSView, NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState,
+        NSVisualEffectView, NSWindowOrderingMode,
+    };
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    let Ok(handle) = cc.window_handle() else { return };
+    let RawWindowHandle::AppKit(handle) = handle.as_raw() else { return };
+    let Some(mtm) = MainThreadMarker::new() else { return };
+    // egui draws into a Metal layer inside winit's view, and a subview of that view
+    // would cover it. So the effect view goes next to it instead, below it in the
+    // window's frame view.
+    let view: &NSView = unsafe { handle.ns_view.cast().as_ref() };
+    let Some(frame_view) = (unsafe { view.superview() }) else { return };
+    let effect = NSVisualEffectView::initWithFrame(mtm.alloc(), frame_view.bounds());
+    effect.setMaterial(NSVisualEffectMaterial::Sidebar);
+    effect.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
+    effect.setState(NSVisualEffectState::FollowsWindowActiveState);
+    effect.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable);
+    frame_view.addSubview_positioned_relativeTo(&effect, NSWindowOrderingMode::Below, Some(view));
+}
+
+// egui's own font (Ubuntu Light) is thin and small for its size next to the rest of
+// macOS, so use San Francisco, read from the system rather than bundled. egui's fonts
+// stay as a fallback for glyphs it lacks. Small text goes from 9 to 10 pt, closer to
+// Mac captions.
+#[cfg(target_os = "macos")]
+fn use_system_font(ctx: &egui::Context) {
+    use egui::epaint::text::{FontInsert, FontPriority, InsertFontFamily};
+    let Ok(font) = std::fs::read("/System/Library/Fonts/SFNS.ttf") else { return };
+    let family = InsertFontFamily { family: egui::FontFamily::Proportional, priority: FontPriority::Highest };
+    ctx.add_font(FontInsert::new("San Francisco", egui::FontData::from_owned(font), vec![family]));
+    ctx.all_styles_mut(|style| {
+        style.text_styles.insert(egui::TextStyle::Small, egui::FontId::proportional(10.0));
+    });
+}
+
+// egui's control fills are about the grey of the sidebar material, so they'd vanish
+// into it. Mac sidebars use white controls with a faint edge instead (light, see-through
+// ones in dark mode).
+fn mac_controls(visuals: &mut egui::Visuals) {
+    use egui::Color32;
+    let (fill, hovered, pressed, edge) = if visuals.dark_mode {
+        (Color32::from_white_alpha(28), Color32::from_white_alpha(40), Color32::from_white_alpha(56), Color32::from_white_alpha(18))
+    } else {
+        (Color32::WHITE, Color32::from_gray(248), Color32::from_gray(232), Color32::from_black_alpha(36))
+    };
+    let widgets = &mut visuals.widgets;
+    for (state, fill) in [(&mut widgets.inactive, fill), (&mut widgets.hovered, hovered), (&mut widgets.active, pressed)] {
+        state.bg_fill = fill;
+        state.weak_bg_fill = fill;
+        state.bg_stroke = egui::Stroke::new(1.0, edge);
+    }
+}
+
+// A sidebar section header: small, bold and grey like in Mac sidebars, or a
+// separator and heading elsewhere.
+fn section(ui: &mut egui::Ui, title: &str) {
+    if NATIVE_SIDEBAR {
+        ui.add_space(14.0);
+        ui.label(egui::RichText::new(title).size(11.0).strong().color(ui.visuals().weak_text_color()));
+        ui.add_space(2.0);
+    } else {
+        ui.separator();
+        ui.heading(title);
     }
 }
 
