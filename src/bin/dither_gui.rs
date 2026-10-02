@@ -32,6 +32,36 @@ fn main() -> eframe::Result {
     )
 }
 
+// How the 8 colors are chosen. Light and Ink derive them from one color per
+// channel (see Mix); Palette sets all 8 directly.
+#[derive(Clone, Copy, PartialEq)]
+enum ColorMode {
+    Light,
+    Ink,
+    Palette,
+}
+
+const COLOR_MODES: [(ColorMode, &str, &str); 3] = [
+    (ColorMode::Light, "Light", "Channels that are on add their color, like a screen"),
+    (ColorMode::Ink, "Ink", "Channels that are off print their color as ink, like a risograph"),
+    (ColorMode::Palette, "Palette", "Pick all 8 colors directly"),
+];
+
+fn preset_mode(preset: &Preset) -> ColorMode {
+    match preset {
+        Preset::Channels(Channels { mix: Mix::Light, .. }) => ColorMode::Light,
+        Preset::Channels(Channels { mix: Mix::Ink, .. }) => ColorMode::Ink,
+        Preset::Palette(_) => ColorMode::Palette,
+    }
+}
+
+// The color settings of one mode, kept so switching modes back and forth keeps edits.
+struct ColorState {
+    channels: Channels,
+    palette: Palette,
+    preset_name: String,
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum View {
     Combined,
@@ -58,6 +88,9 @@ struct App {
     job: Option<Job>,
     // Width to dither at; whenever it differs from the current result, it's dithered again.
     width: u32,
+    mode: ColorMode,
+    // Settings of the modes that aren't shown, indexed by ColorMode.
+    stashed: [Option<ColorState>; 3],
     channels: Channels,
     palette: Palette,
     // Name of the preset the palette came from, or "custom" once edited.
@@ -79,6 +112,8 @@ impl App {
             loaded: None,
             job: None,
             width: 0,
+            mode: ColorMode::Light,
+            stashed: [None, None, None],
             channels: Channels { mix: Mix::Light, colors: [[0; 3]; 3], background: [0; 3] },
             palette: [[0; 3]; 8],
             preset_name: String::new(),
@@ -104,6 +139,28 @@ impl App {
         }
         self.preset_name = name.to_string();
         self.texture_dirty = true;
+    }
+
+    fn set_mode(&mut self, mode: ColorMode) {
+        if mode == self.mode {
+            return;
+        }
+        let current = ColorState { channels: self.channels, palette: self.palette, preset_name: self.preset_name.clone() };
+        self.stashed[self.mode as usize] = Some(current);
+        self.mode = mode;
+        match self.stashed[mode as usize].take() {
+            Some(state) => {
+                self.channels = state.channels;
+                self.palette = state.palette;
+                self.preset_name = state.preset_name;
+                self.texture_dirty = true;
+            }
+            None => {
+                // First visit: start from the mode's first preset.
+                let name = PRESET_NAMES.iter().find(|name| preset(name).is_some_and(|p| preset_mode(&p) == mode));
+                self.apply_preset(name.expect("every mode has a preset"));
+            }
+        }
     }
 
     fn open(&mut self, path: PathBuf, ctx: &egui::Context) {
@@ -172,6 +229,10 @@ impl App {
         let d = &loaded.dithered;
         let palette = match self.view {
             View::Combined => self.palette,
+            // Palette mode has no channel colors, so show the channel in black and white.
+            View::Channel(c) if self.mode == ColorMode::Palette => {
+                std::array::from_fn(|i| if index_bits(i)[c] { [255; 3] } else { [0; 3] })
+            }
             View::Channel(c) => self.channels.channel_palette(c),
         };
         // GPUs cap texture size, so very large images get previewed at every n-th pixel.
@@ -252,41 +313,49 @@ impl App {
 
         ui.separator();
         ui.heading("Colors");
+        ui.horizontal(|ui| {
+            ui.label("Mix");
+            for (mode, label, hover) in COLOR_MODES {
+                if ui.selectable_label(self.mode == mode, label).on_hover_text(hover).clicked() {
+                    self.set_mode(mode);
+                }
+            }
+        });
         egui::ComboBox::from_label("Preset").selected_text(&self.preset_name).show_ui(ui, |ui| {
             for name in PRESET_NAMES {
-                if ui.selectable_label(self.preset_name == name, name).clicked() {
+                let fits = preset(name).is_some_and(|p| preset_mode(&p) == self.mode);
+                if fits && ui.selectable_label(self.preset_name == name, name).clicked() {
                     self.apply_preset(name);
                 }
             }
         });
 
-        let before = self.channels;
-        ui.horizontal(|ui| {
-            ui.label("Mix");
-            ui.selectable_value(&mut self.channels.mix, Mix::Light, "Light")
-                .on_hover_text("Channels that are on add their color, like a screen");
-            ui.selectable_value(&mut self.channels.mix, Mix::Ink, "Ink")
-                .on_hover_text("Channels that are off print their color as ink, like a risograph");
-        });
-        egui::Grid::new("channels").num_columns(2).show(ui, |ui| {
-            let background = if self.channels.mix == Mix::Ink { "Paper" } else { "Background" };
-            ui.label(background);
-            ui.color_edit_button_srgb(&mut self.channels.background);
-            ui.end_row();
-            for (c, label) in CHANNEL_LABELS.iter().enumerate() {
-                ui.label(format!("{label} channel"));
-                ui.color_edit_button_srgb(&mut self.channels.colors[c]);
+        if self.mode != ColorMode::Palette {
+            let before = self.channels;
+            egui::Grid::new("channels").num_columns(2).show(ui, |ui| {
+                let background = if self.mode == ColorMode::Ink { "Paper" } else { "Background" };
+                ui.label(background);
+                ui.color_edit_button_srgb(&mut self.channels.background);
                 ui.end_row();
+                for (c, label) in CHANNEL_LABELS.iter().enumerate() {
+                    ui.label(format!("{label} channel"));
+                    ui.color_edit_button_srgb(&mut self.channels.colors[c]);
+                    ui.end_row();
+                }
+            });
+            if self.channels != before {
+                self.palette = self.channels.palette();
+                self.preset_name = "custom".to_string();
+                self.texture_dirty = true;
             }
-        });
-        if self.channels != before {
-            self.palette = self.channels.palette();
-            self.preset_name = "custom".to_string();
-            self.texture_dirty = true;
         }
 
         ui.add_space(4.0);
-        ui.label("Resulting colors (channels that are on)").on_hover_text("Click one to override it directly");
+        let palette_label = match self.mode {
+            ColorMode::Palette => "Colors (by channels that are on)",
+            _ => "Resulting colors (by channels that are on)",
+        };
+        ui.label(palette_label).on_hover_text("Click one to change it directly");
         egui::Grid::new("palette").num_columns(4).spacing([6.0, 4.0]).show(ui, |ui| {
             for i in 0..8 {
                 ui.vertical_centered(|ui| {
