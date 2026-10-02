@@ -1,12 +1,17 @@
-// Interactive preview: open an image, pick a color per channel (or a preset,
-// or edit the 8 final colors directly) and export the recombined PNG.
+// Interactive preview: open an image, scale it down, pick a color per channel
+// (or a preset, or edit the 8 final colors directly) and export the recombined PNG.
 //
 // Usage: dither_gui [input.png]   (or open / drop an image in the window)
 
-use dither_channels::{index_bits, preset, Channels, Dithered, Mix, Palette, Preset, PRESET_NAMES};
+use dither_channels::{
+    height_for_width, index_bits, load_rgb, preset, resize_to_width, Channels, Dithered, Mix, Palette, Preset,
+    PRESET_NAMES,
+};
 use eframe::egui;
+use image::RgbImage;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver};
+use std::sync::Arc;
 
 fn main() -> eframe::Result {
     let input = std::env::args().nth(1).map(PathBuf::from);
@@ -35,13 +40,24 @@ enum View {
 
 struct Loaded {
     path: PathBuf,
+    // The image as opened, kept so it can be resized and dithered again.
+    source: Arc<RgbImage>,
     dithered: Dithered,
+}
+
+// Loading and dithering run on a background thread so big photos don't freeze the window.
+struct Job {
+    path: PathBuf,
+    // Opening a new image (as opposed to re-dithering the current one at a new size).
+    opening: bool,
+    rx: Receiver<Result<Loaded, String>>,
 }
 
 struct App {
     loaded: Option<Loaded>,
-    // Dithering runs on a background thread so big photos don't freeze the window.
-    loading: Option<(PathBuf, Receiver<Result<Dithered, String>>)>,
+    job: Option<Job>,
+    // Width to dither at; whenever it differs from the current result, it's dithered again.
+    width: u32,
     channels: Channels,
     palette: Palette,
     // Name of the preset the palette came from, or "custom" once edited.
@@ -61,7 +77,8 @@ impl App {
     fn new() -> Self {
         let mut app = App {
             loaded: None,
-            loading: None,
+            job: None,
+            width: 0,
             channels: Channels { mix: Mix::Light, colors: [[0; 3]; 3], background: [0; 3] },
             palette: [[0; 3]; 8],
             preset_name: String::new(),
@@ -90,29 +107,60 @@ impl App {
     }
 
     fn open(&mut self, path: PathBuf, ctx: &egui::Context) {
-        let (tx, rx) = channel();
-        let ctx = ctx.clone();
         let thread_path = path.clone();
-        std::thread::spawn(move || {
-            let _ = tx.send(Dithered::open(&thread_path).map_err(|e| e.to_string()));
-            ctx.request_repaint();
+        self.status = format!("Opening {}…", file_name(&path));
+        self.spawn(path, true, ctx, move || {
+            let source = Arc::new(load_rgb(&thread_path).map_err(|e| e.to_string())?);
+            let dithered = Dithered::from_image(&source);
+            Ok(Loaded { path: thread_path, source, dithered })
         });
-        self.status = format!("Dithering {}…", file_name(&path));
-        self.loading = Some((path, rx));
     }
 
-    fn poll_loading(&mut self) {
-        let Some((path, rx)) = &self.loading else { return };
-        let Ok(result) = rx.try_recv() else { return };
+    fn redither(&mut self, ctx: &egui::Context) {
+        let Some(loaded) = &self.loaded else { return };
+        let (path, source, width) = (loaded.path.clone(), loaded.source.clone(), self.width);
+        self.spawn(path.clone(), false, ctx, move || {
+            let dithered = Dithered::from_image(&resize_to_width(&source, width));
+            Ok(Loaded { path, source, dithered })
+        });
+    }
+
+    // Starting a job replaces any running one; the old result is then dropped.
+    fn spawn(
+        &mut self,
+        path: PathBuf,
+        opening: bool,
+        ctx: &egui::Context,
+        work: impl FnOnce() -> Result<Loaded, String> + Send + 'static,
+    ) {
+        let (tx, rx) = channel();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(work());
+            ctx.request_repaint();
+        });
+        self.job = Some(Job { path, opening, rx });
+    }
+
+    fn poll_job(&mut self) {
+        let Some(job) = &self.job else { return };
+        let Ok(result) = job.rx.try_recv() else { return };
         match result {
-            Ok(dithered) => {
-                self.status = format!("{} · {}×{}", file_name(path), dithered.width, dithered.height);
-                self.loaded = Some(Loaded { path: path.clone(), dithered });
+            Ok(loaded) => {
+                if job.opening {
+                    self.width = loaded.source.width();
+                }
+                let (source, d) = (&loaded.source, &loaded.dithered);
+                self.status = format!("{} · {}×{}", file_name(&loaded.path), source.width(), source.height());
+                if d.width as u32 != source.width() {
+                    self.status += &format!(" → {}×{}", d.width, d.height);
+                }
+                self.loaded = Some(loaded);
                 self.texture_dirty = true;
             }
-            Err(err) => self.status = format!("Couldn't open {}: {err}", file_name(path)),
+            Err(err) => self.status = format!("Couldn't open {}: {err}", file_name(&job.path)),
         }
-        self.loading = None;
+        self.job = None;
     }
 
     fn update_texture(&mut self, ctx: &egui::Context) {
@@ -154,7 +202,10 @@ impl App {
     fn export(&mut self) {
         let Some(loaded) = &self.loaded else { return };
         let stem = loaded.path.file_stem().unwrap_or_default().to_string_lossy();
-        let suffix = if self.preset_name == "rgb" { String::new() } else { format!("_{}", self.preset_name) };
+        let mut suffix = if self.preset_name == "rgb" { String::new() } else { format!("_{}", self.preset_name) };
+        if loaded.dithered.width as u32 != loaded.source.width() {
+            suffix += &format!("_{}px", loaded.dithered.width);
+        }
         let mut dialog = rfd::FileDialog::new()
             .add_filter("PNG", &["png"])
             .set_file_name(format!("{stem}_dither{suffix}.png"));
@@ -176,6 +227,28 @@ impl App {
             }
         }
         ui.label(egui::RichText::new(&self.status).small().weak());
+
+        ui.separator();
+        ui.heading("Size");
+        if let Some(loaded) = &self.loaded {
+            let full = loaded.source.width();
+            let height = height_for_width(&loaded.source, self.width);
+            ui.add(egui::Slider::new(&mut self.width, full.min(16)..=full).logarithmic(true).suffix(" px"))
+                .on_hover_text("Width to dither at. Smaller means bigger dots relative to the picture");
+            ui.horizontal(|ui| {
+                for (label, divisor) in [("⅛", 8), ("¼", 4), ("½", 2), ("Full", 1)] {
+                    if ui.button(label).clicked() {
+                        self.width = (full / divisor).max(1);
+                    }
+                }
+                ui.label(egui::RichText::new(format!("{} × {height}", self.width)).weak());
+                if self.job.as_ref().is_some_and(|job| !job.opening) {
+                    ui.spinner();
+                }
+            });
+        } else {
+            ui.label(egui::RichText::new("Open an image first").weak());
+        }
 
         ui.separator();
         ui.heading("Colors");
@@ -257,12 +330,12 @@ impl App {
     }
 
     fn preview(&mut self, ui: &mut egui::Ui) {
-        if self.loading.is_some() {
-            ui.centered_and_justified(|ui| ui.spinner());
-            return;
-        }
         let (Some(texture), Some(_)) = (&self.texture, &self.loaded) else {
-            ui.centered_and_justified(|ui| ui.label("Open an image or drop one here"));
+            if self.job.is_some() {
+                ui.centered_and_justified(|ui| ui.spinner());
+            } else {
+                ui.centered_and_justified(|ui| ui.label("Open an image or drop one here"));
+            }
             return;
         };
         // Sizes are in points; on a Retina screen one point is two pixels.
@@ -281,7 +354,11 @@ impl App {
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        self.poll_loading();
+        self.poll_job();
+        let resized = self.loaded.as_ref().is_some_and(|l| l.dithered.width as u32 != self.width);
+        if resized && self.job.is_none() {
+            self.redither(ui.ctx());
+        }
         let dropped = ui.ctx().input(|i| i.raw.dropped_files.first().map(|f| f.path().to_path_buf()));
         if let Some(path) = dropped {
             self.open(path, ui.ctx());

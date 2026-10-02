@@ -1,6 +1,7 @@
 // Atkinson dither per RGB channel, plus the palettes that turn the three
 // resulting bits per pixel back into colors. Shared by the CLI and the GUI.
 
+use image::RgbImage;
 use std::error::Error;
 use std::fs::File;
 use std::io::BufWriter;
@@ -110,7 +111,7 @@ impl Preset {
     }
 }
 
-pub const PRESET_NAMES: [&str; 4] = ["rgb", "riso", "gameboy", "sepia"];
+pub const PRESET_NAMES: [&str; 5] = ["rgb", "riso", "gameboy", "sepia", "pico-4"];
 
 pub fn preset(name: &str) -> Option<Preset> {
     Some(match name {
@@ -127,6 +128,17 @@ pub fn preset(name: &str) -> Option<Preset> {
         }),
         "gameboy" => Preset::Palette(ramp_palette([0x0f, 0x38, 0x0f], [0x9b, 0xbc, 0x0f])),
         "sepia" => Preset::Palette(ramp_palette([0x2b, 0x1d, 0x0e], [0xf2, 0xe2, 0xc4])),
+        // The PICO-8 colors closest to each slot's black, blue, green, ... white.
+        "pico-4" => Preset::Palette([
+            [0x00, 0x00, 0x00],
+            [0x1d, 0x2b, 0x53],
+            [0x00, 0x87, 0x51],
+            [0x29, 0xad, 0xff],
+            [0xff, 0x00, 0x4d],
+            [0x7e, 0x25, 0x53],
+            [0xff, 0xec, 0x27],
+            [0xff, 0xf1, 0xe8],
+        ]),
         _ => return None,
     })
 }
@@ -164,6 +176,24 @@ pub fn parse_palette(arg: &str) -> Result<(String, Palette), Box<dyn Error>> {
     Ok(("custom".to_string(), palette))
 }
 
+pub fn load_rgb(path: &Path) -> Result<RgbImage, Box<dyn Error>> {
+    Ok(image::open(path)?.to_rgb8())
+}
+
+// Scales to the given width, keeping the aspect ratio. Dithering a smaller image
+// makes the dots bigger relative to the picture.
+pub fn resize_to_width(image: &RgbImage, width: u32) -> RgbImage {
+    if width == image.width() {
+        return image.clone();
+    }
+    let height = height_for_width(image, width);
+    image::imageops::resize(image, width.max(1), height, image::imageops::FilterType::Lanczos3)
+}
+
+pub fn height_for_width(image: &RgbImage, width: u32) -> u32 {
+    (image.height() as f64 * width as f64 / image.width() as f64).round().max(1.0) as u32
+}
+
 // An image dithered to 1 bit per channel; each channel holds 0s and 255s.
 pub struct Dithered {
     pub width: usize,
@@ -181,9 +211,8 @@ impl Dithered {
         Dithered { width, height, channels }
     }
 
-    pub fn open(path: &Path) -> Result<Self, Box<dyn Error>> {
-        let image = image::open(path)?.to_rgb8();
-        Ok(Self::new(image.as_raw(), image.width() as usize, image.height() as usize))
+    pub fn from_image(image: &RgbImage) -> Self {
+        Self::new(image.as_raw(), image.width() as usize, image.height() as usize)
     }
 
     // Palette index (r, g, b bits) of the pixel at flat position i.
