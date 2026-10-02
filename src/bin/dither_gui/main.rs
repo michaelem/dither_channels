@@ -17,6 +17,10 @@ use std::sync::Arc;
 mod menu;
 
 fn main() -> eframe::Result {
+    // Outside the .app bundle (e.g. with cargo run), macOS names the app menu after
+    // the binary, dither_gui. Renaming the process before the app starts fixes that.
+    #[cfg(target_os = "macos")]
+    objc2_foundation::NSProcessInfo::processInfo().setProcessName(&objc2_foundation::NSString::from_str("Dither Channels"));
     let input = std::env::args().nth(1).map(PathBuf::from);
     // eframe sets the Dock/taskbar icon at runtime (egui's logo unless told otherwise),
     // which would also override the icon of the macOS app bundle.
@@ -501,13 +505,16 @@ impl App {
         ui.label(palette_label).on_hover_text("Click one to change it directly");
         egui::Grid::new("palette").num_columns(4).spacing([6.0, 4.0]).show(ui, |ui| {
             for i in 0..8 {
-                ui.vertical_centered(|ui| {
+                // Centre the label under its swatch only. Unconstrained, the last column
+                // reaches to the panel edge and its swatches drift off to the right.
+                let swatch = ui.spacing().interact_size.x;
+                ui.allocate_ui(egui::vec2(swatch, 0.0), |ui| ui.vertical_centered(|ui| {
                     if ui.color_edit_button_srgb(&mut self.palette[i]).changed() {
                         self.preset_name = "custom".to_string();
                         self.texture_dirty = true;
                     }
                     ui.label(egui::RichText::new(slot_label(i)).small().weak());
-                });
+                }));
                 if i % 4 == 3 {
                     ui.end_row();
                 }

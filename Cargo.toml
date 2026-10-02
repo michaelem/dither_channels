@@ -12,7 +12,7 @@ rfd = { version = "0.17.2", optional = true }
 [features]
 default = ["gui"]
 # Build the CLI alone, without the UI toolkit: cargo build --no-default-features
-gui = ["dep:eframe", "dep:rfd", "dep:muda", "dep:objc2", "dep:objc2-app-kit", "dep:raw-window-handle"]
+gui = ["dep:eframe", "dep:rfd", "dep:muda", "dep:objc2", "dep:objc2-app-kit", "dep:objc2-foundation", "dep:raw-window-handle"]
 
 [[bin]]
 name = "dither_gui"
@@ -24,4 +24,5 @@ required-features = ["gui"]
 muda = { version = "0.21.0", optional = true }
 objc2 = { version = "0.6.4", optional = true }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSResponder", "NSView", "NSVisualEffectView", "NSGraphics"], optional = true }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSProcessInfo", "NSString"], optional = true }
 raw-window-handle = { version = "0.6.2", optional = true }
