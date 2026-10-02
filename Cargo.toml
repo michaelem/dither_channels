@@ -12,8 +12,12 @@ rfd = { version = "0.17.2", optional = true }
 [features]
 default = ["gui"]
 # Build the CLI alone, without the UI toolkit: cargo build --no-default-features
-gui = ["dep:eframe", "dep:rfd"]
+gui = ["dep:eframe", "dep:rfd", "dep:muda"]
 
 [[bin]]
 name = "dither_gui"
 required-features = ["gui"]
+
+# Native menu bar on macOS; other platforms get an in-window menu bar.
+[target.'cfg(target_os = "macos")'.dependencies]
+muda = { version = "0.21.0", optional = true }
