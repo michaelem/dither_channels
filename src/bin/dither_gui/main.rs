@@ -17,10 +17,6 @@ use std::sync::Arc;
 mod menu;
 
 fn main() -> eframe::Result {
-    // Outside the .app bundle (e.g. with cargo run), macOS names the app menu after
-    // the binary, dither_gui. Renaming the process before the app starts fixes that.
-    #[cfg(target_os = "macos")]
-    objc2_foundation::NSProcessInfo::processInfo().setProcessName(&objc2_foundation::NSString::from_str("Dither Channels"));
     let input = std::env::args().nth(1).map(PathBuf::from);
     // eframe sets the Dock/taskbar icon at runtime (egui's logo unless told otherwise),
     // which would also override the icon of the macOS app bundle.
