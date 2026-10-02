@@ -1,6 +1,7 @@
-// Applies an Atkinson dither to each RGB channel separately, then recombines them.
+// Dithers each RGB channel separately (Atkinson by default), then recombines them.
 //
-// Usage: dither_channels [input.png] [--width PIXELS] [--palette NAME|HEX,HEX,...]...
+// Usage: dither_channels [input.png] [--width PIXELS] [--dither NAME] [--serpentine]
+//                        [--palette NAME|HEX,HEX,...]...
 // Writes <name>_dither_red.png, _green.png, _blue.png (1-bit each)
 // and <name>_dither.png (the recombined 8-color image) next to the input.
 //
@@ -12,10 +13,15 @@
 // in the file name (<name>_dither_riso.png, or _custom for hex lists).
 // --width scales the image before dithering (keeping its aspect ratio), which
 // makes the dither coarser relative to the picture.
+// --dither picks the algorithm: atkinson, floyd-steinberg, jarvis, stucki, burkes,
+// sierra, sierra-lite, bayer-2, bayer-4, bayer-8, halftone, random or threshold.
+// --serpentine scans every other row backwards (error diffusion algorithms only).
 //
 // For an interactive version with a preview, see the dither_gui binary.
 
-use dither_channels::{load_rgb, parse_palette, resize_to_width, Dithered, CHANNEL_NAMES};
+use dither_channels::{
+    load_rgb, parse_palette, resize_to_width, Algorithm, DitherOptions, Dithered, ALGORITHMS, CHANNEL_NAMES,
+};
 use std::error::Error;
 use std::path::{Path, PathBuf};
 
@@ -30,6 +36,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     let mut input = None;
     let mut palettes = Vec::new();
     let mut width = None;
+    let mut options = DitherOptions::default();
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         if arg == "--palette" {
@@ -38,6 +45,14 @@ fn run() -> Result<(), Box<dyn Error>> {
             let value = args.next().ok_or("--width needs a value")?;
             let value: u32 = value.parse().map_err(|_| format!("--width expects a number of pixels, got {value:?}"))?;
             width = Some(value.max(1));
+        } else if arg == "--dither" {
+            let name = args.next().ok_or("--dither needs a value")?;
+            options.algorithm = Algorithm::from_name(&name).ok_or_else(|| {
+                let names: Vec<String> = ALGORITHMS.iter().map(Algorithm::name).collect();
+                format!("unknown dither {name:?} (try {})", names.join(", "))
+            })?;
+        } else if arg == "--serpentine" {
+            options.serpentine = true;
         } else {
             input = Some(arg);
         }
@@ -54,7 +69,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     if let Some(width) = width {
         image = resize_to_width(&image, width);
     }
-    let dithered = Dithered::from_image(&image);
+    let dithered = Dithered::from_image(&image, options);
     for (c, name) in CHANNEL_NAMES.iter().enumerate() {
         let path = base(&format!("_dither_{name}"));
         dithered.save_channel(c, &path)?;

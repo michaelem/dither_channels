@@ -5,7 +5,7 @@
 
 use dither_channels::{
     height_for_width, index_bits, load_rgb, preset, resize_to_width, Channels, Dithered, Mix, Palette, Preset,
-    CHANNEL_NAMES, PRESET_NAMES,
+    Algorithm, DitherOptions, ALGORITHMS, CHANNEL_NAMES, PRESET_NAMES,
 };
 use eframe::egui;
 use image::RgbImage;
@@ -84,6 +84,8 @@ struct Loaded {
     // The image as opened, kept so it can be resized and dithered again.
     source: Arc<RgbImage>,
     dithered: Dithered,
+    // The settings `dithered` was made with.
+    options: DitherOptions,
 }
 
 // Loading and dithering run on a background thread so big photos don't freeze the window.
@@ -99,6 +101,8 @@ struct App {
     job: Option<Job>,
     // Width to dither at; whenever it differs from the current result, it's dithered again.
     width: u32,
+    // Algorithm to dither with; like `width`, a change triggers dithering again.
+    options: DitherOptions,
     mode: ColorMode,
     // Settings of the modes that aren't shown, indexed by ColorMode.
     stashed: [Option<ColorState>; 3],
@@ -125,6 +129,7 @@ impl App {
             loaded: None,
             job: None,
             width: 0,
+            options: DitherOptions::default(),
             mode: ColorMode::Light,
             stashed: [None, None, None],
             channels: Channels { mix: Mix::Light, colors: [[0; 3]; 3], background: [0; 3] },
@@ -180,20 +185,21 @@ impl App {
 
     fn open(&mut self, path: PathBuf, ctx: &egui::Context) {
         let thread_path = path.clone();
+        let options = self.options;
         self.status = format!("Opening {}…", file_name(&path));
         self.spawn(path, true, ctx, move || {
             let source = Arc::new(load_rgb(&thread_path).map_err(|e| e.to_string())?);
-            let dithered = Dithered::from_image(&source);
-            Ok(Loaded { path: thread_path, source, dithered })
+            let dithered = Dithered::from_image(&source, options);
+            Ok(Loaded { path: thread_path, source, dithered, options })
         });
     }
 
     fn redither(&mut self, ctx: &egui::Context) {
         let Some(loaded) = &self.loaded else { return };
-        let (path, source, width) = (loaded.path.clone(), loaded.source.clone(), self.width);
+        let (path, source, width, options) = (loaded.path.clone(), loaded.source.clone(), self.width, self.options);
         self.spawn(path.clone(), false, ctx, move || {
-            let dithered = Dithered::from_image(&resize_to_width(&source, width));
-            Ok(Loaded { path, source, dithered })
+            let dithered = Dithered::from_image(&resize_to_width(&source, width), options);
+            Ok(Loaded { path, source, dithered, options })
         });
     }
 
@@ -274,11 +280,18 @@ impl App {
         }
     }
 
-    // Output file name without extension, e.g. "photo_dither_riso_400px".
+    // Output file name without extension, e.g. "photo_dither_halftone_riso_400px".
     // `part` replaces the preset name (used for the single channels).
     fn output_stem(loaded: &Loaded, part: &str) -> String {
         let stem = loaded.path.file_stem().unwrap_or_default().to_string_lossy();
         let mut name = format!("{stem}_dither");
+        let options = loaded.options;
+        if options != DitherOptions::default() {
+            name += &format!("_{}", options.algorithm.name());
+            if options.serpentine && options.algorithm.is_error_diffusion() {
+                name += "-serpentine";
+            }
+        }
         if !part.is_empty() && part != "rgb" {
             name += &format!("_{part}");
         }
@@ -408,6 +421,25 @@ impl App {
         }
 
         ui.separator();
+        ui.heading("Dither");
+        egui::ComboBox::from_label("Algorithm").selected_text(self.options.algorithm.label()).show_ui(ui, |ui| {
+            for (i, algorithm) in ALGORITHMS.into_iter().enumerate() {
+                // Separate the error diffusion, ordered and other groups.
+                if i > 0 && algorithm.is_error_diffusion() != ALGORITHMS[i - 1].is_error_diffusion()
+                    || algorithm == Algorithm::Halftone
+                {
+                    ui.separator();
+                }
+                ui.selectable_value(&mut self.options.algorithm, algorithm, algorithm.label());
+            }
+        });
+        ui.add_enabled(
+            self.options.algorithm.is_error_diffusion(),
+            egui::Checkbox::new(&mut self.options.serpentine, "Serpentine"),
+        )
+        .on_hover_text("Scan every other row right to left, which breaks up diagonal \"worm\" patterns");
+
+        ui.separator();
         ui.heading("Colors");
         ui.horizontal(|ui| {
             ui.label("Mix");
@@ -520,8 +552,9 @@ impl App {
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.poll_job();
-        let resized = self.loaded.as_ref().is_some_and(|l| l.dithered.width as u32 != self.width);
-        if resized && self.job.is_none() {
+        let outdated =
+            self.loaded.as_ref().is_some_and(|l| l.dithered.width as u32 != self.width || l.options != self.options);
+        if outdated && self.job.is_none() {
             self.redither(ui.ctx());
         }
         let dropped = ui.ctx().input(|i| i.raw.dropped_files.first().map(|f| f.path().to_path_buf()));
