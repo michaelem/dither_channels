@@ -59,9 +59,22 @@ cargo build --no-default-features      # CLI only, without the GUI dependencies
 macos/build-app.sh [--universal] [--dmg]
 ```
 
-There are no tests; check changes by running the CLI on an image and/or the GUI.
-Sample input/output images (`_DSF6099*.png`) sit in the parent directory and are
-not part of this repo.
+## Tests
+
+`cargo test` (add `--release` for speed). Unit tests sit in a `tests` module at the
+end of `src/lib.rs` (kernels, Bayer matrices, tone of each algorithm on flat greys,
+palettes, parsing). `tests/samples.rs` dithers the sample photo in
+`tests/fixtures/` with the library and the CLI and compares the PNGs decoded
+(header, palette, packed rows) to the stored outputs: defaults (Atkinson, full
+size) with `rgb` and with the PICO-8 colors as a hex palette. If a change to the
+default dither is intended, regenerate the fixtures with the CLI:
+
+```sh
+cargo run --release --bin dither_channels -- tests/fixtures/_DSF6099.png --palette rgb \
+  --palette 000000,1d2b53,008751,29adff,ff004d,7e2553,ffec27,fff1e8
+```
+
+The GUI has no tests; check it by running it.
 
 ## Style
 

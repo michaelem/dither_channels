@@ -558,3 +558,231 @@ fn save_png(
     encoder.write_header()?.write_image_data(data)?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const OPTIONS: DitherOptions = DitherOptions { algorithm: Algorithm::Atkinson, serpentine: false };
+
+    fn with(algorithm: Algorithm) -> DitherOptions {
+        DitherOptions { algorithm, ..OPTIONS }
+    }
+
+    // Share of pixels that came out on.
+    fn coverage(bits: &[u8]) -> f64 {
+        bits.iter().filter(|&&v| v == 255).count() as f64 / bits.len() as f64
+    }
+
+    #[test]
+    fn algorithm_names_round_trip() {
+        for algorithm in ALGORITHMS {
+            assert_eq!(Algorithm::from_name(&algorithm.name()), Some(algorithm));
+        }
+        assert_eq!(Algorithm::from_name("bayer-3"), None);
+        let mut labels: Vec<String> = ALGORITHMS.iter().map(Algorithm::label).collect();
+        labels.sort();
+        labels.dedup();
+        assert_eq!(labels.len(), ALGORITHMS.len(), "labels must be unique");
+    }
+
+    #[test]
+    fn bayer_matrices() {
+        assert_eq!(bayer_matrix(2), [0, 2, 3, 1]);
+        assert_eq!(bayer_matrix(4), [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5]);
+        // Every threshold rank appears exactly once.
+        let mut ranks = bayer_matrix(8);
+        ranks.sort();
+        assert_eq!(ranks, (0..64).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn threshold_rounds_at_128() {
+        let out = dither(&[0, 127, 128, 255], 4, 1, 0, with(Algorithm::Threshold));
+        assert_eq!(out, [0, 0, 255, 255]);
+    }
+
+    #[test]
+    fn output_is_one_bit() {
+        let (w, h) = (37, 23);
+        let values: Vec<u8> = (0..w * h).map(|i| (i * 7 % 256) as u8).collect();
+        for algorithm in ALGORITHMS {
+            for c in 0..3 {
+                let out = dither(&values, w, h, c, with(algorithm));
+                assert_eq!(out.len(), values.len());
+                assert!(out.iter().all(|&v| v == 0 || v == 255), "{}", algorithm.name());
+            }
+        }
+    }
+
+    #[test]
+    fn black_stays_black() {
+        let black = vec![0; 32 * 32];
+        for algorithm in ALGORITHMS {
+            for c in 0..3 {
+                assert_eq!(coverage(&dither(&black, 32, 32, c, with(algorithm))), 0.0, "{}", algorithm.name());
+            }
+        }
+    }
+
+    #[test]
+    fn white_stays_white() {
+        let white = vec![255; 32 * 32];
+        // Random compares against noise up to 255, so pure white still gets a stray dot now and then.
+        for algorithm in ALGORITHMS.into_iter().filter(|&a| a != Algorithm::Random) {
+            for c in 0..3 {
+                assert_eq!(coverage(&dither(&white, 32, 32, c, with(algorithm))), 1.0, "{}", algorithm.name());
+            }
+        }
+    }
+
+    #[test]
+    fn grey_levels_keep_their_brightness() {
+        let (w, h) = (64, 64);
+        for level in [64u8, 128, 192] {
+            let grey = vec![level; w * h];
+            // Atkinson drops part of the error on purpose, and round halftone dots
+            // don't grow linearly; both have their own tests.
+            let skip = [Algorithm::Threshold, Algorithm::Atkinson, Algorithm::Halftone];
+            for algorithm in ALGORITHMS.into_iter().filter(|a| !skip.contains(a)) {
+                for c in 0..3 {
+                    let on = coverage(&dither(&grey, w, h, c, with(algorithm)));
+                    let expected = level as f64 / 255.0;
+                    assert!((on - expected).abs() < 0.03, "{} at {level}: {on:.3} on", algorithm.name());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn atkinson_pushes_greys_apart() {
+        // Losing a quarter of the error makes shadows darker and highlights lighter, mid grey stays.
+        let on = |level: u8| coverage(&dither(&vec![level; 64 * 64], 64, 64, 0, OPTIONS));
+        assert!(on(64) < 0.22 && on(64) > 0.1, "{:.3}", on(64));
+        assert!((on(128) - 0.5).abs() < 0.03, "{:.3}", on(128));
+        assert!(on(192) > 0.78 && on(192) < 0.9, "{:.3}", on(192));
+    }
+
+    #[test]
+    fn halftone_dots_grow_with_brightness() {
+        let on = |level: u8, c: usize| coverage(&dither(&vec![level; 96 * 96], 96, 96, c, with(Algorithm::Halftone)));
+        for c in 0..3 {
+            let levels: Vec<f64> = (0..=8).map(|i| on((i * 255 / 8) as u8, c)).collect();
+            assert!(levels.windows(2).all(|pair| pair[0] <= pair[1]), "channel {c}: {levels:?}");
+            assert_eq!((levels[0], levels[8]), (0.0, 1.0), "channel {c}");
+        }
+        // Dots touch in a checkerboard at mid grey. Only the rotated screens: on the
+        // 0° one (blue) pixel centres land exactly where the spot function ties.
+        for c in 0..2 {
+            assert!((on(128, c) - 0.5).abs() < 0.03, "channel {c}: {:.3}", on(128, c));
+        }
+    }
+
+    #[test]
+    fn serpentine_only_affects_error_diffusion() {
+        let (w, h) = (40, 30);
+        let values: Vec<u8> = (0..w * h).map(|i| (i % w * 255 / w) as u8).collect();
+        for algorithm in ALGORITHMS {
+            let plain = dither(&values, w, h, 0, with(algorithm));
+            let serpentine = dither(&values, w, h, 0, DitherOptions { algorithm, serpentine: true });
+            assert_eq!(plain != serpentine, algorithm.is_error_diffusion(), "{}", algorithm.name());
+        }
+    }
+
+    #[test]
+    fn channels_get_different_patterns() {
+        // Halftone screen angles and random noise are per channel; the rest treat channels alike.
+        let grey = vec![100; 48 * 48];
+        for algorithm in ALGORITHMS {
+            let red = dither(&grey, 48, 48, 0, with(algorithm));
+            let green = dither(&grey, 48, 48, 1, with(algorithm));
+            let per_channel = matches!(algorithm, Algorithm::Halftone | Algorithm::Random);
+            assert_eq!(red != green, per_channel, "{}", algorithm.name());
+        }
+    }
+
+    #[test]
+    fn dithered_indexes_by_rgb_bits() {
+        // One pixel per palette slot, in palette order.
+        let rgb: Vec<u8> = (0..8).flat_map(|i| index_bits(i).map(|on| if on { 255 } else { 0 })).collect();
+        let dithered = Dithered::new(&rgb, 8, 1, with(Algorithm::Threshold));
+        assert_eq!((0..8).map(|i| dithered.index(i)).collect::<Vec<_>>(), [0, 1, 2, 3, 4, 5, 6, 7]);
+    }
+
+    #[test]
+    fn rgb_preset_is_the_eight_primaries() {
+        let palette = preset("rgb").unwrap().palette();
+        assert_eq!(
+            palette,
+            [[0, 0, 0], [0, 0, 255], [0, 255, 0], [0, 255, 255], [255, 0, 0], [255, 0, 255], [255, 255, 0], [255, 255, 255]]
+        );
+    }
+
+    #[test]
+    fn ink_multiplies_over_paper() {
+        let channels = Channels {
+            mix: Mix::Ink,
+            colors: [[0, 255, 255], [255, 0, 255], [255, 255, 0]],
+            background: [200, 200, 200],
+        };
+        let palette = channels.palette();
+        // All channels on means no ink, just paper; all off means every ink on top of each other.
+        assert_eq!(palette[7], [200, 200, 200]);
+        assert_eq!(palette[0], [0, 0, 0]);
+        // Only red off: cyan ink over the paper.
+        assert_eq!(palette[3], [0, 200, 200]);
+        // Each channel on its own: its ink or paper, as if the others were on.
+        assert_eq!(channels.channel_palette(1)[0], [200, 0, 200]);
+        assert_eq!(channels.channel_palette(1)[2], [200, 200, 200]);
+    }
+
+    #[test]
+    fn light_adds_and_clips() {
+        let channels = Channels { mix: Mix::Light, colors: [[200, 0, 0], [100, 100, 0], [0, 0, 50]], background: [10, 10, 10] };
+        let palette = channels.palette();
+        assert_eq!(palette[0], [10, 10, 10]);
+        assert_eq!(palette[6], [255, 110, 10]);
+        assert_eq!(channels.channel_palette(2)[1], [10, 10, 60]);
+        assert_eq!(channels.channel_palette(2)[7], [10, 10, 60]);
+    }
+
+    #[test]
+    fn ramps_go_from_first_to_last_stop() {
+        let stops = [[0x0f, 0x38, 0x0f], [0x9b, 0xbc, 0x0f]];
+        let palette = ramp_palette(&stops);
+        assert_eq!(palette[0], stops[0]);
+        assert_eq!(palette[7], stops[1]);
+        // Brighter slots (by luminance) get lighter colors: blue < red < green.
+        assert!(palette[1][1] < palette[4][1] && palette[4][1] < palette[2][1]);
+    }
+
+    #[test]
+    fn every_preset_name_resolves() {
+        for name in PRESET_NAMES {
+            let (parsed, palette) = parse_palette(name).unwrap();
+            assert_eq!(parsed, name);
+            assert_eq!(palette, preset(name).unwrap().palette());
+        }
+    }
+
+    #[test]
+    fn parses_hex_palettes() {
+        let (name, palette) = parse_palette("#000000, 0000ff,00ff00,00ffff,ff0000,ff00ff,FFFF00,ffffff").unwrap();
+        assert_eq!(name, "custom");
+        assert_eq!(palette, preset("rgb").unwrap().palette());
+        assert!(parse_palette("000000,ffffff").unwrap_err().to_string().contains("expected 8 colors, got 2"));
+        assert!(parse_palette("nope").unwrap_err().to_string().contains("gameboy"));
+        assert!(parse_hex("12345").is_err());
+        assert!(parse_hex("gg0000").is_err());
+        assert_eq!(parse_hex("#0a0B0c").unwrap(), [10, 11, 12]);
+    }
+
+    #[test]
+    fn resizing_keeps_the_aspect_ratio() {
+        let image = RgbImage::new(1333, 1000);
+        assert_eq!(height_for_width(&image, 400), 300);
+        assert_eq!(height_for_width(&image, 1), 1);
+        let resized = resize_to_width(&image, 200);
+        assert_eq!(resized.dimensions(), (200, 150));
+    }
+}
