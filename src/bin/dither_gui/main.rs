@@ -409,6 +409,8 @@ impl App {
     fn sidebar(&mut self, ui: &mut egui::Ui) {
         if NATIVE_SIDEBAR {
             mac_controls(ui.visuals_mut());
+            // egui's buttons hug their text (4 × 1 pt); Mac push buttons have more room.
+            ui.spacing_mut().button_padding = egui::vec2(8.0, 3.0);
         }
         ui.add_space(if NATIVE_SIDEBAR { 4.0 } else { 8.0 });
         if ui.button("Open image…").clicked() {
