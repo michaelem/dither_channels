@@ -1,0 +1,19 @@
+[package]
+name = "dither_channels"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+eframe = { version = "0.36.2", optional = true }
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
+png = "0.18.1"
+rfd = { version = "0.17.2", optional = true }
+
+[features]
+default = ["gui"]
+# Build the CLI alone, without the UI toolkit: cargo build --no-default-features
+gui = ["dep:eframe", "dep:rfd"]
+
+[[bin]]
+name = "dither_gui"
+required-features = ["gui"]
